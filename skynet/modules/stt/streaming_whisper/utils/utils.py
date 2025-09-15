@@ -225,17 +225,23 @@ def find_biggest_gap_between_words(word_list: list[WhisperWord]) -> CutMark:
             biggest_gap_so_far = diff
             result = CutMark(start=prev_word.end, end=word.start, probability=probability)
             log.debug(f'Biggest gap between words:\n{result}')
+        if cfg.VAD_MAX_PAUSE > 0 and diff > cfg.VAD_MAX_PAUSE and probability > cfg.VAD_MIN_CONFIDENCE:
+            log.debug(f'Found a gap of {diff}s which is bigger than the max_pause of {cfg.VAD_MAX_PAUSE}s')
+            result = CutMark(start=prev_word.end, end=word.start, probability=probability)
+            return result
         prev_word = word
     return result
 
 
 def get_cut_mark_from_segment_probability(ts_result: WhisperResult) -> CutMark:
+    # find a gap between words bigger than the configured max_pause
+    cut_mark = find_biggest_gap_between_words(ts_result.words)
+    if cut_mark.end > 0:
+        return cut_mark
+
     check_len = len(ts_result.words) - 1
     phrase = ''
     if len(ts_result.words) > 1:
-        # force a final at the biggest gap between words found if the audio is longer than 10 seconds
-        if ts_result.words[-1].end >= 10:
-            return find_biggest_gap_between_words(ts_result.words)
         for i, word in enumerate(ts_result.words):
             if i == check_len:
                 break
@@ -250,9 +256,6 @@ def get_cut_mark_from_segment_probability(ts_result: WhisperResult) -> CutMark:
                     log.debug(f'Found split at {word.word} ({word.end} - {ts_result.words[i+1].start})')
                     log.debug(f'Avg probability: {avg_probability}')
                     return CutMark(start=word.end, end=ts_result.words[i + 1].start, probability=avg_probability)
-                else:
-                    if ts_result.words[-1].end >= 15:
-                        return find_biggest_gap_between_words(ts_result.words)
     return CutMark()
 
 

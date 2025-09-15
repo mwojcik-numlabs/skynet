@@ -39,6 +39,13 @@ model = WhisperModel(
 
 one_byte_s = 0.00003125  # the equivalent of one byte in seconds for 16kHz audio, 2 bytes per sample, mono
 
+
+VAD_MAX_PAUSE = 0.8
+"""The maximum pause (in seconds) between words before forcing a final transcription."""
+
+VAD_MIN_CONFIDENCE = 0.8
+"""The minimum confidence (average probability of words) required to finalize a transcription based on a VAD-detected pause."""
+
 log.info('====== WHISPER MODEL INFO ======')
 log.info(f'Model: {path_or_model_name}')
 log.info(f'Multilingual: {model.model.is_multilingual}')
