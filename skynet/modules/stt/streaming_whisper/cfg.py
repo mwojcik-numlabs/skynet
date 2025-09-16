@@ -1,3 +1,5 @@
+import os
+
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad
 
@@ -16,17 +18,19 @@ log = get_logger(__name__)
 
 vad_model = load_silero_vad(onnx=False)
 
-device = whisper_device if whisper_device != 'auto' else device
-log.info(f'Using {device}')
+device = whisper_device if whisper_device != "auto" else device
+log.info(f"Using {device}")
 num_workers = 1
 gpu_indices = [0]
 
 if whisper_gpu_indices is not None:
-    gpu_indices = whisper_gpu_indices.strip().split(',')
+    gpu_indices = whisper_gpu_indices.strip().split(",")
     # one worker per gpu core
     num_workers = len(gpu_indices)
 
-path_or_model_name = whisper_model_name if whisper_model_name is not None else whisper_model_path
+path_or_model_name = (
+    whisper_model_name if whisper_model_name is not None else whisper_model_path
+)
 
 model = WhisperModel(
     path_or_model_name,
@@ -40,12 +44,12 @@ model = WhisperModel(
 one_byte_s = 0.00003125  # the equivalent of one byte in seconds for 16kHz audio, 2 bytes per sample, mono
 
 
-VAD_MAX_PAUSE = 0.8
+VAD_MAX_PAUSE = float(os.getenv("VAD_MAX_PAUSE", "0.8"))
 """The maximum pause (in seconds) between words before forcing a final transcription."""
 
-VAD_MIN_CONFIDENCE = 0.8
+VAD_MIN_CONFIDENCE = float(os.getenv("VAD_MIN_CONFIDENCE", "0.8"))
 """The minimum confidence (average probability of words) required to finalize a transcription based on a VAD-detected pause."""
 
-log.info('====== WHISPER MODEL INFO ======')
-log.info(f'Model: {path_or_model_name}')
-log.info(f'Multilingual: {model.model.is_multilingual}')
+log.info("====== WHISPER MODEL INFO ======")
+log.info(f"Model: {path_or_model_name}")
+log.info(f"Multilingual: {model.model.is_multilingual}")
