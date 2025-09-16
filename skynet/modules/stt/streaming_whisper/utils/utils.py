@@ -213,6 +213,8 @@ def get_phrase_prob(last_word_idx: int, words: list[WhisperWord]) -> float:
 
 
 def find_biggest_gap_between_words(word_list: list[WhisperWord]) -> CutMark:
+    if not word_list:
+        return CutMark()
     prev_word = word_list[0]
     biggest_gap_so_far = 0.0
     result = CutMark()
