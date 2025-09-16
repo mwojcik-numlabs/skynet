@@ -248,14 +248,23 @@ def get_cut_mark_from_segment_probability(ts_result: WhisperResult) -> CutMark:
             phrase += word.word
             avg_probability = get_phrase_prob(i, ts_result.words)
             if len(phrase) >= 48:
-                if (
-                    avg_probability >= whisper_min_probability
-                    and word.word[-1] in ['.', '!', '?']
-                    and word.end < ts_result.words[i + 1].start
-                ):
-                    log.debug(f'Found split at {word.word} ({word.end} - {ts_result.words[i+1].start})')
-                    log.debug(f'Avg probability: {avg_probability}')
-                    return CutMark(start=word.end, end=ts_result.words[i + 1].start, probability=avg_probability)
+                if avg_probability >= whisper_min_probability and word.end < ts_result.words[i + 1].start:
+                    last_char = word.word.strip()[-1]
+                    if last_char in ['.', '!', '?']:
+                        log.debug(f'Found split at {word.word} ({word.end} - {ts_result.words[i+1].start})')
+                        log.debug(f'Avg probability: {avg_probability}')
+                        return CutMark(start=word.end, end=ts_result.words[i + 1].start, probability=avg_probability)
+                    if last_char == ',':
+                        pause = ts_result.words[i + 1].start - word.end
+                        if pause > 0.4:
+                            log.debug(
+                                f'Found split at comma with pause {pause}s at {word.word} ({word.end} -' 
+                                f' {ts_result.words[i+1].start})'
+                            )
+                            log.debug(f'Avg probability: {avg_probability}')
+                            return CutMark(
+                                start=word.end, end=ts_result.words[i + 1].start, probability=avg_probability
+                            )
     return CutMark()
 
 
