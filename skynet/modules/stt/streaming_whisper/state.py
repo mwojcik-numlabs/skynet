@@ -42,6 +42,7 @@ class State:
         self.is_transcribing = False
         self.last_speech_timestamp = 0.0
         self.total_audio_received_s = 0.0
+        self.should_force_final = False
 
     def _extract_transcriptions(
         self, last_pause: utils.CutMark, ts_result: utils.WhisperResult
@@ -130,6 +131,15 @@ class State:
 
     async def process(self, chunk: Chunk, previous_tokens: list[int]) -> List[utils.TranscriptionResponse] | None:
         await self.add_to_store(chunk, self.working_audio + chunk.raw)
+
+        # If long silence was detected and we have buffered audio, force finalization
+        if self.should_force_final and len(self.working_audio) > 0 and not self.is_transcribing:
+            log.info(f'Participant {self.participant_id}: forcing finalization due to long silence detection')
+            self.should_force_final = False
+            results = await self.force_transcription(previous_tokens)
+            if results:
+                return results
+
         if not self.long_silence and not self.is_transcribing:
             ts_result = await self.do_transcription(self.working_audio, previous_tokens)
             last_pause = utils.get_cut_mark_from_segment_probability(ts_result)
@@ -168,8 +178,17 @@ class State:
             # set the long silence flag
             audio_length_seconds = utils.convert_bytes_to_seconds(tmp_working_audio)
             if speech_timestamps and audio_length_seconds - speech_timestamps[-1]['end'] >= 1:
-                log.debug(f'## Participant {self.participant_id}: long silence detected')
-                self.long_silence = True
+                # Only set the flag and trigger finalization if we're transitioning to long_silence
+                if not self.long_silence:
+                    log.info(
+                        f'## Participant {self.participant_id}: long silence detected '
+                        f'({audio_length_seconds - speech_timestamps[-1]["end"]:.2f}s since last speech), '
+                        f'will force finalization of buffered audio ({len(self.working_audio)} bytes)'
+                    )
+                    self.long_silence = True
+                    # Set flag to force finalization on next process call
+                    if len(self.working_audio) > 0:
+                        self.should_force_final = True
 
         log.debug(
             f'Participant {self.participant_id}: chunk length {chunk.size} bytes, '
