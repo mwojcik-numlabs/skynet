@@ -60,18 +60,26 @@ class WhisperResult:
     confidence: float
     language: str
 
-    def __init__(self, ts_result):
-        self.text = ''.join([segment.text for segment in ts_result])
-        self.segments = [WhisperSegment.model_validate(segment._asdict()) for segment in ts_result]
-        self.words = [WhisperWord.model_validate(word._asdict()) for segment in ts_result for word in segment.words]
+    def __init__(self, ts_result, language: str = "en"):
+        self.text = "".join([segment.text for segment in ts_result])
+        self.segments = [
+            WhisperSegment.model_validate(segment._asdict()) for segment in ts_result
+        ]
+        self.words = [
+            WhisperWord.model_validate(word._asdict())
+            for segment in ts_result
+            for word in segment.words
+        ]
         self.confidence = self.get_confidence()
+        self.language = language
 
     def __str__(self):
         return (
-            f'Text: {self.text}\n'
-            + f'Confidence avg: {self.confidence}\n'
-            + f'Segments: {self.segments}\n'
-            + f'Words: {self.words}'
+            f"Text: {self.text}\n"
+            + f"Language: {self.language}\n"
+            + f"Confidence avg: {self.confidence}\n"
+            + f"Segments: {self.segments}\n"
+            + f"Words: {self.words}"
         )
 
     def get_confidence(self) -> float:
@@ -185,7 +193,7 @@ LANGUAGES = {
 # List of final transcriptions which should not be included in the initial prompt.
 # This is to prevent the model from repeating the same text over and over or become
 # biased towards a specific way of transcribing.
-black_listed_prompts = ['. .']
+black_listed_prompts = [". ."]
 
 
 def convert_bytes_to_seconds(byte_str: bytes) -> float:
@@ -199,10 +207,10 @@ def convert_seconds_to_bytes(cut_mark: float) -> int:
 def is_silent(audio: bytes) -> Tuple[bool, iter]:
     chunk_duration = convert_bytes_to_seconds(audio)
     wav_header = get_wav_header([audio], chunk_duration_s=chunk_duration)
-    stream = wav_header + b'' + audio
+    stream = wav_header + b"" + audio
     audio = read_audio(stream)
     st = get_speech_timestamps(audio, model=cfg.vad_model, return_seconds=True)
-    log.debug(f'Detected speech timestamps: {st}')
+    log.debug(f"Detected speech timestamps: {st}")
     silent = True if len(st) == 0 else False
     return silent, st
 
@@ -213,8 +221,6 @@ def get_phrase_prob(last_word_idx: int, words: list[WhisperWord]) -> float:
 
 
 def find_biggest_gap_between_words(word_list: list[WhisperWord]) -> CutMark:
-    if not word_list:
-        return CutMark()
     prev_word = word_list[0]
     biggest_gap_so_far = 0.0
     result = CutMark()
@@ -225,70 +231,72 @@ def find_biggest_gap_between_words(word_list: list[WhisperWord]) -> CutMark:
         probability = get_phrase_prob(i - 1, word_list)
         if diff > biggest_gap_so_far:
             biggest_gap_so_far = diff
-            result = CutMark(start=prev_word.end, end=word.start, probability=probability)
-            log.debug(f'Biggest gap between words:\n{result}')
-        if cfg.VAD_MAX_PAUSE > 0 and diff > cfg.VAD_MAX_PAUSE and probability > cfg.VAD_MIN_CONFIDENCE:
-            log.debug(f'Found a gap of {diff}s which is bigger than the max_pause of {cfg.VAD_MAX_PAUSE}s')
-            result = CutMark(start=prev_word.end, end=word.start, probability=probability)
-            return result
+            result = CutMark(
+                start=prev_word.end, end=word.start, probability=probability
+            )
+            log.debug(f"Biggest gap between words:\n{result}")
         prev_word = word
     return result
 
 
 def get_cut_mark_from_segment_probability(ts_result: WhisperResult) -> CutMark:
-    # find a gap between words bigger than the configured max_pause
-    cut_mark = find_biggest_gap_between_words(ts_result.words)
-    if cut_mark.end > 0:
-        return cut_mark
-
     check_len = len(ts_result.words) - 1
-    phrase = ''
+    phrase = ""
     if len(ts_result.words) > 1:
+        # force a final at the biggest gap between words found if the audio is longer than 10 seconds
+        if ts_result.words[-1].end >= 10:
+            return find_biggest_gap_between_words(ts_result.words)
         for i, word in enumerate(ts_result.words):
             if i == check_len:
                 break
             phrase += word.word
             avg_probability = get_phrase_prob(i, ts_result.words)
             if len(phrase) >= 48:
-                if avg_probability >= whisper_min_probability and word.end < ts_result.words[i + 1].start:
-                    last_char = word.word.strip()[-1]
-                    if last_char in ['.', '!', '?']:
-                        log.debug(f'Found split at {word.word} ({word.end} - {ts_result.words[i+1].start})')
-                        log.debug(f'Avg probability: {avg_probability}')
-                        return CutMark(start=word.end, end=ts_result.words[i + 1].start, probability=avg_probability)
-                    if last_char == ',':
-                        pause = ts_result.words[i + 1].start - word.end
-                        if pause > 0.4:
-                            log.debug(
-                                f'Found split at comma with pause {pause}s at {word.word} ({word.end} -' 
-                                f' {ts_result.words[i+1].start})'
-                            )
-                            log.debug(f'Avg probability: {avg_probability}')
-                            return CutMark(
-                                start=word.end, end=ts_result.words[i + 1].start, probability=avg_probability
-                            )
+                if (
+                    avg_probability >= whisper_min_probability
+                    and word.word[-1] in [".", "!", "?"]
+                    and word.end < ts_result.words[i + 1].start
+                ):
+                    log.debug(
+                        f"Found split at {word.word} ({word.end} - {ts_result.words[i + 1].start})"
+                    )
+                    log.debug(f"Avg probability: {avg_probability}")
+                    return CutMark(
+                        start=word.end,
+                        end=ts_result.words[i + 1].start,
+                        probability=avg_probability,
+                    )
+                else:
+                    if ts_result.words[-1].end >= 15:
+                        return find_biggest_gap_between_words(ts_result.words)
     return CutMark()
 
 
-def get_wav_header(chunks: List[bytes], chunk_duration_s: float = 0.256, sample_rate: int = 16000) -> bytes:
+def get_wav_header(
+    chunks: List[bytes], chunk_duration_s: float = 0.256, sample_rate: int = 16000
+) -> bytes:
     duration = len(chunks) * chunk_duration_s
     samples = int(duration * sample_rate)
     bits_per_sample = 16
     channels = 1
     datasize = samples * channels * bits_per_sample // 8
-    o = bytes("RIFF", 'ascii')  # (4byte) Marks file as RIFF
-    o += (datasize + 36).to_bytes(4, 'little')  # (4byte) File size in bytes excluding this and RIFF marker
-    o += bytes("WAVE", 'ascii')  # (4byte) File type
-    o += bytes("fmt ", 'ascii')  # (4byte) Format Chunk Marker
-    o += (16).to_bytes(4, 'little')  # (4byte) Length of above format data
-    o += (1).to_bytes(2, 'little')  # (2byte) Format type (1 - PCM)
-    o += channels.to_bytes(2, 'little')  # (2byte)
-    o += sample_rate.to_bytes(4, 'little')  # (4byte)
-    o += (sample_rate * channels * bits_per_sample // 8).to_bytes(4, 'little')  # (4byte)
-    o += (channels * bits_per_sample // 8).to_bytes(2, 'little')  # (2byte)
-    o += bits_per_sample.to_bytes(2, 'little')  # (2byte)
-    o += bytes("data", 'ascii')  # (4byte) Data Chunk Marker
-    o += datasize.to_bytes(4, 'little')  # (4byte) Data size in bytes
+    o = bytes("RIFF", "ascii")  # (4byte) Marks file as RIFF
+    o += (datasize + 36).to_bytes(
+        4, "little"
+    )  # (4byte) File size in bytes excluding this and RIFF marker
+    o += bytes("WAVE", "ascii")  # (4byte) File type
+    o += bytes("fmt ", "ascii")  # (4byte) Format Chunk Marker
+    o += (16).to_bytes(4, "little")  # (4byte) Length of above format data
+    o += (1).to_bytes(2, "little")  # (2byte) Format type (1 - PCM)
+    o += channels.to_bytes(2, "little")  # (2byte)
+    o += sample_rate.to_bytes(4, "little")  # (4byte)
+    o += (sample_rate * channels * bits_per_sample // 8).to_bytes(
+        4, "little"
+    )  # (4byte)
+    o += (channels * bits_per_sample // 8).to_bytes(2, "little")  # (2byte)
+    o += bits_per_sample.to_bytes(2, "little")  # (2byte)
+    o += bytes("data", "ascii")  # (4byte) Data Chunk Marker
+    o += datasize.to_bytes(4, "little")  # (4byte) Data size in bytes
     return o
 
 
@@ -301,34 +309,40 @@ def now() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
-def transcribe(buffer_list: List[bytes], lang: str = 'en', previous_tokens=None) -> WhisperResult:
+def transcribe(
+    buffer_list: List[bytes], lang: str = "en", previous_tokens=None
+) -> WhisperResult:
     if previous_tokens is None:
         previous_tokens = []
-    audio_bytes = b''.join(buffer_list)
+    audio_bytes = b"".join(buffer_list)
     audio = load_audio(audio_bytes)
-    iterator, _ = cfg.model.transcribe(
+    iterator, info = cfg.model.transcribe(
         audio,
-        language=lang,
-        task='transcribe',
+        language=None,  # Auto-detect language from audio
+        task="transcribe",
         word_timestamps=True,
         beam_size=whisper_beam_size,
         initial_prompt=previous_tokens,
         condition_on_previous_text=False,
     )
     res = list(iterator)
-    ts_obj = WhisperResult(res)
-    log.debug(f'Transcription results:\n{ts_obj}\n{res}')
+    detected_language = info.language
+    log.debug(
+        f"Detected language: {detected_language} (probability: {info.language_probability:.2f})"
+    )
+    ts_obj = WhisperResult(res, detected_language)
+    log.debug(f"Transcription results:\n{ts_obj}\n{res}")
     return ts_obj
 
 
 def get_lang(lang: str, short=True) -> str:
     if len(lang) == 2 and short:
         return lang.lower().strip()
-    if '-' in lang and short:
-        return lang.split('-')[0].strip()
-    if not short and '-' in lang:
-        split_key = lang.split('-')[0]
-        return LANGUAGES.get(split_key, 'english').lower().strip()
+    if "-" in lang and short:
+        return lang.split("-")[0].strip()
+    if not short and "-" in lang:
+        split_key = lang.split("-")[0]
+        return LANGUAGES.get(split_key, "english").lower().strip()
     return lang.lower().strip()
 
 
@@ -343,7 +357,10 @@ class Uuid7:
         if time_arg_millis is not None:
             timestamp_ms = time_arg_millis
 
-        if self.last_v7_timestamp is not None and timestamp_ms <= self.last_v7_timestamp:
+        if (
+            self.last_v7_timestamp is not None
+            and timestamp_ms <= self.last_v7_timestamp
+        ):
             timestamp_ms = self.last_v7_timestamp + 1
         self.last_v7_timestamp = timestamp_ms
         uuid_int = (timestamp_ms & 0xFFFFFFFFFFFF) << 80
@@ -352,7 +369,7 @@ class Uuid7:
 
 
 def get_jwt(ws_headers, ws_url_param=None) -> str:
-    auth_header = ws_headers.get('authorization', None)
+    auth_header = ws_headers.get("authorization", None)
     if auth_header is not None:
-        return auth_header.split(' ')[-1]
-    return ws_url_param if ws_url_param is not None else ''
+        return auth_header.split(" ")[-1]
+    return ws_url_param if ws_url_param is not None else ""
