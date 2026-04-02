@@ -24,13 +24,17 @@ from skynet.modules.ttt.assistant.constants import assistant_rag_question_extrac
 from skynet.modules.ttt.assistant.utils import get_assistant_chat_messages
 from skynet.modules.ttt.assistant.v1.models import AssistantDocumentPayload
 from skynet.modules.ttt.llm_selector import LLMSelector
+from skynet.modules.ttt.ratelimit_tracker import (
+    extract_ratelimit_from_response,
+    get_ratelimit_callback,
+    should_track_ratelimit,
+)
 from skynet.modules.ttt.summaries.prompts.action_items import (
     action_items_conversation,
     action_items_emails,
     action_items_meeting,
     action_items_text,
 )
-from skynet.modules.ttt.summaries.prompts.common import set_response_language
 from skynet.modules.ttt.summaries.prompts.summary import (
     summary_conversation,
     summary_emails,
@@ -172,11 +176,11 @@ async def summarize(model: BaseChatModel, payload: DocumentPayload, job_type: Jo
             system_message = config.get('live_summary_prompt')
 
     if not system_message:
-        system_message = hint_type_to_prompt[job_type][payload.hint]
+        prompt_fn = hint_type_to_prompt[job_type][payload.hint]
+        system_message = prompt_fn(payload.preferred_locale)
 
     prompt = ChatPromptTemplate(
         [
-            ('system', set_response_language(payload.preferred_locale)),
             ('system', system_message),
             ('human', '{text}'),
         ]
@@ -206,7 +210,13 @@ async def summarize(model: BaseChatModel, payload: DocumentPayload, job_type: Jo
         docs = text_splitter.create_documents([text])
         chain = load_summarize_chain(model, chain_type='map_reduce', combine_prompt=prompt, map_prompt=prompt)
 
-    result = await chain.ainvoke(input={'input_documents': docs})
+    # Add rate limit callback for system's own API key
+    callbacks = []
+    if should_track_ratelimit(customer_id):
+        processor = LLMSelector.get_job_processor(customer_id)
+        callbacks.append(get_ratelimit_callback(processor.value))
+
+    result = await chain.ainvoke(input={'input_documents': docs}, config={'callbacks': callbacks})
     formatted_result = result['output_text'].replace(response_prefix, '').strip()
 
     log.info(f'input length: {len(system_message) + len(text)}')
@@ -287,21 +297,32 @@ async def process_chat_completion(
 ) -> str:
     llm = LLMSelector.select(customer_id, **model_kwargs)
 
-    chain = llm | StrOutputParser()
-    result = await chain.ainvoke(messages)
+    response = await llm.ainvoke(messages)
 
-    return result
+    # Track rate limits for system's own API key
+    if customer_id and should_track_ratelimit(customer_id):
+        processor = LLMSelector.get_job_processor(customer_id)
+        extract_ratelimit_from_response(response, processor.value)
+
+    return response.content
 
 
 async def process_chat_completion_stream(
     messages: List[ChatCompletionMessageParam], customer_id: Optional[str] = None, **model_kwargs
 ):
     llm = LLMSelector.select(customer_id, **model_kwargs)
-    chain = llm | StrOutputParser()
+    track_ratelimit = customer_id and should_track_ratelimit(customer_id)
+    first_chunk = True
 
     try:
-        async for message in chain.astream(messages):
-            yield message
+        async for chunk in llm.astream(messages):
+            # Track rate limits from first chunk (headers only available there)
+            if first_chunk and track_ratelimit:
+                processor = LLMSelector.get_job_processor(customer_id)
+                extract_ratelimit_from_response(chunk, processor.value)
+                first_chunk = False
+
+            yield chunk.content if hasattr(chunk, 'content') else str(chunk)
     except Exception as e:
         yield json.dumps(
             {'error': e.body if hasattr(e, 'body') else str(e), 'code': e.code if hasattr(e, 'code') else None}
